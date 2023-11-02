@@ -1,66 +1,144 @@
-const fs       = require('fs');
-const readline = require('readline');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const RORDER = /^Global vcount = (.+)/m;
+const RFAILD = /^total size = (.+)/m;
+const RSIZE  = /^Batching time = (.+?) Edges = (.+)/m;
+const RTLOAD = /^Make graph time = (.+)/m;
+const RTVIEW = /^static View creation = (.+)/m;
+const RTBFS  = /^BFS root = (.+?)Time = (.+)/m;
+const GRAPHS = [
+  'indochina-2004',
+  'arabic-2005',
+  'uk-2005',
+  'webbase-2001',
+  'it-2004',
+  'sk-2005',
+  'com-LiveJournal',
+  'com-Orkut',
+  'asia_osm',
+  'europe_osm',
+  'kmer_A2a',
+  'kmer_V1r',
+];
 
 
 
 
-// Get the number of rows, columns, and size of graph in Matrix Market format.
-async function readMtxSizes(pth) {
-  const fin  = fs.createReadStream(pth);
-  const flin = readline.createInterface({input: fin, crlfDelay: Infinity});
-  var   rows = 0, cols = 0, size = 0;
-  for await (const line of flin) {
-    if (line[0] === '%') continue;
-    var [rows, cols, size] = line.trim().split(/\s+/).map(w => parseInt(w, 10));
-    break;
-  }
-  flin.close();
-  fin.close();
-  return [rows, cols, size];
+// *-FILE
+// ------
+
+function readFile(pth) {
+  var d = fs.readFileSync(pth, 'utf8');
+  return d.replace(/\r?\n/g, '\n');
+}
+
+function writeFile(pth, d) {
+  d = d.replace(/\r?\n/g, os.EOL);
+  fs.writeFileSync(pth, d);
 }
 
 
-// Convert Matrix Market format to plain EdgeList format (without vertex/edge counts).
-async function convertMtxToEdgelist(pin, pout) {
-  const fin  = fs.createReadStream(pin);
-  const fout = fs.createWriteStream(pout);
-  const flin = readline.createInterface({input: fin, crlfDelay: Infinity});
-  var   skip = true;
-  for await (const line of flin) {
-    if (line[0] === '%') continue;
-    if (skip) { skip = false; continue; }
-    fout.write(line + '\n');
-  }
-  flin.close();
-  fin.close();
-  fout.close();
+
+
+// *-CSV
+// -----
+
+function writeCsv(pth, rows) {
+  var cols = Object.keys(rows[0]);
+  var a = cols.join()+'\n';
+  for (var r of rows)
+    a += [...Object.values(r)].map(v => `"${v}"`).join()+'\n';
+  writeFile(pth, a);
 }
 
 
 
 
-// Main function.
-async function main(cmd, pin, pout) {
+// *-LOG
+// -----
+
+function readLogLine(ln, data, state) {
+  if (RORDER.test(ln)) {
+    if (!state) state = {};
+    if (!state.graph) state.graph = GRAPHS[0];
+    else state.graph = GRAPHS[(GRAPHS.indexOf(state.graph) + 1) % GRAPHS.length];
+    var [, order] = RORDER.exec(ln);
+    state.failed = false;
+    state.order  = parseFloat(order);
+    console.log(state.graph, ln);
+  }
+  else if (RFAILD.test(ln)) {
+    var [, size] = RFAILD.exec(ln);
+    state.failed = size<=0;
+  }
+  else if (RSIZE.test(ln)) {
+    var [,, size] = RSIZE.exec(ln);
+    state.size = parseFloat(size);
+  }
+  else if (RTLOAD.test(ln)) {
+    var [, load_time] = RTLOAD.exec(ln);
+    state.load_time = parseFloat(load_time);
+  }
+  else if (RTVIEW.test(ln)) {
+    var [, view_time] = RTVIEW.exec(ln);
+    state.view_time = parseFloat(view_time);
+  }
+  else if (RTBFS.test(ln)) {
+    var [,, bfs_time] = RTBFS.exec(ln);
+    if (!data.has(state.graph)) data.set(state.graph, []);
+    data.get(state.graph).push(Object.assign({}, state, {
+      bfs_time: parseFloat(bfs_time),
+    }));
+  }
+  return state;
+}
+
+function readLog(pth) {
+  var text  = readFile(pth);
+  var lines = text.split('\n');
+  var data  = new Map();
+  var state = null;
+  for (var ln of lines)
+    state = readLogLine(ln, data, state);
+  return data;
+}
+
+
+
+
+// PROCESS-*
+// ---------
+
+function processCsv(data) {
+  var a = [];
+  for (var rows of data.values())
+    a.push(...rows);
+  return a;
+}
+
+
+
+
+// MAIN
+// ----
+
+function main(cmd, log, out) {
+  var data = readLog(log);
+  if (path.extname(out)==='') cmd += '-dir';
   switch (cmd) {
-    case 'read-mtx-rows':
-      const [rows] = await readMtxSizes(pin);
-      console.log(rows);
+    case 'csv':
+      var rows = processCsv(data);
+      writeCsv(out, rows);
       break;
-    case 'read-mtx-cols':
-      const [, cols] = await readMtxSizes(pin);
-      console.log(cols);
-      break;
-    case 'read-mtx-size':
-      const [,, size] = await readMtxSizes(pin);
-      console.log(size);
-      break;
-    case 'convert-mtx-to-edgelist':
-      pout = pout || pin.replace(/\.mtx$/, '.edgelist');
-      await convertMtxToEdgelist(pin, pout);
+    case 'csv-dir':
+      for (var [graph, rows] of data)
+        writeCsv(path.join(out, graph+'.csv'), rows);
       break;
     default:
       console.error(`error: "${cmd}"?`);
       break;
   }
-};
+}
 main(...process.argv.slice(2));
